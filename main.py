@@ -1,22 +1,42 @@
 import io
+import os
 import joblib
 import numpy as np
 import pandas as pd
 import pdfplumber
 import docx
+import gdown
 
 from fastapi import FastAPI, Form, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from sklearn.metrics.pairwise import cosine_similarity
 from typing import Optional
 
-# Load artifacts directly from repo
-vectorizer   = joblib.load("tfidf_vectorizer.pkl")
-tfidf_matrix = joblib.load("tfidf_matrix.pkl")
-jobs_df      = pd.read_csv("jobs_clean.csv")
+# ── Download artifacts from Google Drive on cold start ──────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+ARTIFACTS = {
+    "tfidf_vectorizer.pkl": "1Hxjw3hZOGdym32IfMKrnrUM4PZ3MlEOl",
+    "tfidf_matrix.pkl":     "1ad1dQC9UXwipP5jhEr4jP1S_WAmqSLNm",
+    "jobs_clean.csv":       "19DW0X-8bUV6S2nWayf5p1DsWp0m4NqqY",
+}
+
+for filename, file_id in ARTIFACTS.items():
+    dest = os.path.join(BASE_DIR, filename)
+    if not os.path.exists(dest):
+        print(f"Downloading {filename} from Google Drive...")
+        gdown.download(f"https://drive.google.com/uc?id={file_id}", dest, quiet=False)
+    else:
+        print(f"{filename} already exists, skipping download.")
+
+# ── Load artifacts ───────────────────────────────────────────────────────────
+vectorizer   = joblib.load(os.path.join(BASE_DIR, "tfidf_vectorizer.pkl"))
+tfidf_matrix = joblib.load(os.path.join(BASE_DIR, "tfidf_matrix.pkl"))
+jobs_df      = pd.read_csv(os.path.join(BASE_DIR, "jobs_clean.csv"))
 
 app = FastAPI(title="NLP Job Matcher")
 
+# ── Text extraction helpers ──────────────────────────────────────────────────
 def extract_text_from_pdf(file_bytes):
     text = ""
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -39,6 +59,7 @@ def extract_resume_text(file):
     else:
         raise HTTPException(status_code=400, detail="Upload a PDF or DOCX file.")
 
+# ── Matching logic ───────────────────────────────────────────────────────────
 def match_jobs(resume_text, top_n=10):
     resume_vec   = vectorizer.transform([resume_text])
     similarities = cosine_similarity(resume_vec, tfidf_matrix).flatten()
@@ -47,14 +68,15 @@ def match_jobs(resume_text, top_n=10):
     for rank, idx in enumerate(top_indices, start=1):
         row = jobs_df.iloc[idx]
         results.append({
-    "rank":        rank,
-    "title":       str(row.get("title", "N/A")),
-    "company":     str(row.get("company_name", "N/A")),
-    "preview":     str(row.get("description", ""))[:150] + "...",
-    "similarity":  round(float(similarities[idx]), 4),
-})
+            "rank":       rank,
+            "title":      str(row.get("title", "N/A")),
+            "company":    str(row.get("company_name", "N/A")),
+            "preview":    str(row.get("description", ""))[:150] + "...",
+            "similarity": round(float(similarities[idx]), 4),
+        })
     return results
 
+# ── Routes ───────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"message": "NLP Job Matcher is running. POST to /match"}
